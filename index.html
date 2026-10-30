@@ -1214,6 +1214,7 @@ body { background: var(--bg); color: var(--text); }
 <div class="card-dark mb-3">
 <div class="font-semibold">Central Geral de Alertas</div>
 <div class="muted-s mb-3">Clique em uma linha para ver o registro completo. Filtre por gravidade, tipo e busca livre.</div>
+<div class="muted-s mb-3">Registros com status Perdida ou Fechada não geram alertas.</div>
 <div class="filters mb-3">
 <label>Gravidade<select class="dark-select" id="aSev"><option value="">Todas</option><option>Crítico</option><option>Atenção</option><option>Info</option></select></label>
 <label>Tipo<select class="dark-select" id="aTipo"><option value="">Todos</option><option>Previsão vencida</option><option>Inconsistência</option><option>Campo obrigatório</option><option>Placeholder</option><option>Probabilidade inválida</option></select></label>
@@ -1344,6 +1345,8 @@ const n = parseFloat(String(v).replace(/\./g,'').replace(',','.').replace(/[^\d.
 return isNaN(n) ? null : n;
 }
 const mesmoDia = (a, b) => a && b && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+const statusSemAlerta = s => { const n = normKey(s || '').replace(/_/g, ' '); return n === 'perdida' || n === 'fechada'; };
+function deveGerarAlerta(registro) { return !statusSemAlerta(registro && registro.status); }
 
 /* ---------- leitura da planilha ---------- */
 async function carregarPlanilha() {
@@ -1418,6 +1421,7 @@ const ROTULOS = { vendedor:'vendedor', data:'data_prospeccao', cliente:'cliente'
 
 function validarRegistro(r) {
 const out = { classe: 'COMPLETO', placeholder: false, previsaoVencida: false, diasAtraso: 0, alertas: [], faltando: [], inconsist: [] };
+const geraAlerta = deveGerarAlerta(r);
 
 // Placeholder
 if (vazio(r.status) || vazio(r.cliente) || !STATUS_VALIDOS.includes(r.status)) {
@@ -1435,7 +1439,7 @@ const obrig = obrigatoriosPara(r.status);
 obrig.forEach(c => { if (c === 'data' ? !r.data : vazio(r[c])) out.faltando.push(c); });
 if (out.faltando.length) {
 out.classe = 'INCOMPLETO';
-out.alertas.push({ gravidade: 'Atenção', tipo: 'Campo obrigatório', regra: 'Faltando: ' + out.faltando.map(c => ROTULOS[c]).join(', ') });
+if (geraAlerta) out.alertas.push({ gravidade: 'Atenção', tipo: 'Campo obrigatório', regra: 'Faltando: ' + out.faltando.map(c => ROTULOS[c]).join(', ') });
 }
 
 // Coerência
@@ -1447,11 +1451,11 @@ if (r.previsao && r.data && r.previsao < r.data) out.inconsist.push('Previsão d
 
 if (out.inconsist.length) {
 out.classe = 'COM INCONSISTÊNCIA';
-out.inconsist.forEach(t => out.alertas.push({ gravidade: 'Crítico', tipo: 'Inconsistência', regra: t }));
+if (geraAlerta) out.inconsist.forEach(t => out.alertas.push({ gravidade: 'Crítico', tipo: 'Inconsistência', regra: t }));
 }
 
 // Previsão vencida
-if (r.previsao && r.status !== 'Fechado' && r.status !== 'Perdido' && r.previsao < inicioDoDia(HOJE)) {
+if (geraAlerta && r.previsao && r.status !== 'Fechado' && r.status !== 'Perdido' && r.previsao < inicioDoDia(HOJE)) {
 out.previsaoVencida = true;
 out.diasAtraso = Math.floor((inicioDoDia(HOJE) - r.previsao) / 86400000);
 out.alertas.push({ gravidade: 'Crítico', tipo: 'Previsão vencida', regra: `Previsão de início em ${fmtDate(r.previsao)} (${out.diasAtraso} dia(s) de atraso)` });
@@ -1462,7 +1466,7 @@ if (!vazio(r.probabilidade)) {
 const p = String(r.probabilidade).trim().toLowerCase();
 const ehPct = /^\d+([.,]\d+)?\s*%?$/.test(p);
 const ehTexto = PROB_TEXTO.includes(p);
-if (!ehPct && !ehTexto) out.alertas.push({ gravidade: 'Atenção', tipo: 'Probabilidade inválida', regra: `Valor "${r.probabilidade}" fora de Alta/Média/Baixa ou percentual` });
+if (geraAlerta && !ehPct && !ehTexto) out.alertas.push({ gravidade: 'Atenção', tipo: 'Probabilidade inválida', regra: `Valor "${r.probabilidade}" fora de Alta/Média/Baixa ou percentual` });
 }
 
 return out;
@@ -1521,7 +1525,7 @@ const finais = validos.filter(r => r.status === 'Fechado' || r.status === 'Perdi
 const conv = finais ? fechados.length / finais * 100 : 0;
 const completos = validos.filter(r => r.v.classe === 'COMPLETO').length;
 const criticos = ALERTAS.filter(a => a.gravidade === 'Crítico' && regs.includes(a.reg)).length;
-const vencidas = validos.filter(r => r.v.previsaoVencida).length;
+const vencidas = validos.filter(r => r.v.previsaoVencida && deveGerarAlerta(r)).length;
 return { total, volTotal, volFech, conv, completos, pctCompletos: total ? completos/total*100 : 0, criticos, vencidas, fechados: fechados.length, finais };
 }
 
@@ -1587,12 +1591,13 @@ function renderAlertas() {
 const sev = val('aSev'), tipo = val('aTipo'), busca = val('aBusca').toLowerCase();
 const vis = ALERTAS.filter(a => {
 if (!filtradosSet.has(a.reg)) return false;
+if (!deveGerarAlerta(a.reg)) return false;
 if (sev && a.gravidade !== sev) return false;
 if (tipo && a.tipo !== tipo) return false;
 if (busca && !(`${a.filial} ${a.vendedor} ${a.cliente} ${a.regra}`.toLowerCase().includes(busca))) return false;
 return true;
 });
-const cnt = g => ALERTAS.filter(a => a.gravidade === g && filtradosSet.has(a.reg)).length;
+const cnt = g => ALERTAS.filter(a => a.gravidade === g && filtradosSet.has(a.reg) && deveGerarAlerta(a.reg)).length;
 document.getElementById('cntCritico').textContent = 'Crítico: ' + cnt('Crítico');
 document.getElementById('cntAtencao').textContent = 'Atenção: ' + cnt('Atenção');
 document.getElementById('cntInfo').textContent = 'Info: ' + cnt('Info');
@@ -1623,10 +1628,11 @@ cont.innerHTML = filiais.map(f => {
 const rs = regs.filter(r => r.filial === f);
 const validos = rs.filter(r => !r.v.placeholder);
 const n = validos.length || 1;
+const comAlerta = rs.filter(deveGerarAlerta);
 const comp = validos.filter(r=>r.v.classe==='COMPLETO').length;
 const inc = validos.filter(r=>r.v.classe==='INCOMPLETO').length;
 const inco = validos.filter(r=>r.v.classe==='COM INCONSISTÊNCIA').length;
-const pend = ALERTAS.filter(a => a.filial === f && filtradosSet.has(a.reg) && a.gravidade !== 'Info').slice(0, 8);
+const pend = ALERTAS.filter(a => a.filial === f && filtradosSet.has(a.reg) && deveGerarAlerta(a.reg) && a.gravidade !== 'Info').slice(0, 8);
 return `
 <div class="card-dark mb-3">
 <div class="row between items-center mb-2" style="flex-wrap:wrap">
@@ -1662,7 +1668,7 @@ if (r.status === 'Fechado') { m.volFech += r.volume||0; m.fech++; }
 if (r.status === 'Fechado' || r.status === 'Perdido') m.finais++;
 if (r.v.classe !== 'COMPLETO') m.incomp++;
 });
-ALERTAS.forEach(a => { if (filtradosSet.has(a.reg) && map[a.vendedor]) map[a.vendedor].alertas++; });
+ALERTAS.forEach(a => { if (filtradosSet.has(a.reg) && deveGerarAlerta(a.reg) && map[a.vendedor]) map[a.vendedor].alertas++; });
 const lista = Object.values(map).sort((a,b)=>b.volFech - a.volFech);
 const tb = document.querySelector('#tblRanking tbody');
 tb.innerHTML = lista.map((m,i) => `
